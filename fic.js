@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { styleText } from "node:util";
 import { spawn, spawnSync } from "node:child_process";
-import { printBanner } from "./utils/unicode-banner.js";
 
 const timer = performance.now();
 
@@ -63,8 +62,11 @@ async function testAll(files, concurrency) {
 }
 
 async function main() {
-  printBanner("flac-integrity-checker", "magenta");
-  console.log();
+  const banner = `┌─┐┬  ┌─┐┌─┐   ┬┌┐┌┌┬┐┌─┐┌─┐┬─┐┬┌┬┐┬ ┬   ┌─┐┬ ┬┌─┐┌─┐┬┌─┌─┐┬─┐
+├┤ │  ├─┤│  ───││││ │ ├┤ │ ┬├┬┘│ │ └┬┘───│  ├─┤├┤ │  ├┴┐├┤ ├┬┘
+└  ┴─┘┴ ┴└─┘   ┴┘└┘ ┴ └─┘└─┘┴└─┴ ┴  ┴    └─┘┴ ┴└─┘└─┘┴ ┴└─┘┴└─
+`;
+  console.log(styleText("magenta", banner));
 
   // check if flac is available
   const checkFlac = spawnSync("flac", ["-v"]);
