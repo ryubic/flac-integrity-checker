@@ -1,4 +1,4 @@
-# flac-integrity-checker
+# flac-integrity-checker (fic.js)
 
 A Node.js script that scans directories, categorizes files, verifies the integrity of FLAC audio files using the official flac binary, and provides detailed reports.
 
@@ -35,7 +35,7 @@ A Node.js script that scans directories, categorizes files, verifies the integri
 Run the script directly using Node.js:
 
 ```bash
-node flac-integrity-checker.js /path/to/music/folder
+node fic.js /path/to/music/folder
 ```
 
 ## Output

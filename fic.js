@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { styleText } from "node:util";
 import { spawn, spawnSync } from "node:child_process";
-import { printBanner } from "./unicode-banner.js";
+import { printBanner } from "./utils/unicode-banner.js";
 
 const timer = performance.now();
 
