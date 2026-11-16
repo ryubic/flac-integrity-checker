@@ -1,1 +1,1 @@
-node "$PSScriptRoot\flac-integrity-checker.js" @args
+node "$PSScriptRoot\fic.js" @args

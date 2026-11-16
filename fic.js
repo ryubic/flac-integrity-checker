@@ -29,17 +29,23 @@ async function testAll(files, concurrency) {
     Array.from({ length: Math.min(concurrency, files.length) }, async () => {
       for (const file of queue) {
         const outcome = await new Promise((resolve) => {
-          const child = spawn("flac", ["-s", "-t", file]);
+          const child = spawn("flac", ["--silent", "--test", "--", file], {
+            stdio: ["ignore", "ignore", "pipe"],
+          });
+
           let stderr = "";
 
+          child.stderr.setEncoding("utf8"); // chunks are now strings, and multi-byte chars are never split
           child.stderr.on("data", (chunk) => (stderr += chunk));
+
           child.on("error", (err) => resolve({ error: err.message })); // flac missing / can't start
-          child.on("close", (code) => {
+
+          child.on("close", (code, signal) => {
             if (code !== 0) {
-              const idx = stderr.search(/^ERROR:/m);
-              const reason =
-                idx === -1 ? stderr.trim() : stderr.slice(idx).trim();
-              resolve({ error: reason || `flac exited with code ${code}` });
+              const exit = signal
+                ? `terminated by ${signal}`
+                : `exited with code ${code}`;
+              resolve({ error: stderr.trim() || `flac ${exit}` });
             } else if (stderr.includes("WARNING, cannot check MD5 signature")) {
               resolve({ noMd5: true });
             } else {
@@ -69,7 +75,7 @@ async function main() {
   console.log(styleText("magenta", banner));
 
   // check if flac is available
-  const checkFlac = spawnSync("flac", ["-v"]);
+  const checkFlac = spawnSync("flac", ["--version"]);
 
   if (checkFlac.status !== 0 || checkFlac.error?.code === "ENOENT")
     throw new Error(
@@ -103,7 +109,7 @@ async function main() {
       withFileTypes: true,
       recursive: true,
     })
-    .filter((entry) => !entry.isDirectory())
+    .filter((entry) => entry.isFile())
     .map((entry) => path.join(entry.parentPath, entry.name));
 
   const filesByExtension = {};
@@ -123,49 +129,47 @@ async function main() {
 
   for (const ext in filesByExtension) {
     totalFiles += filesByExtension[ext].length;
-    extLog += `    ${ext !== "" ? ext : " no ext"}: ${filesByExtension[ext].length}`;
+    extLog += `    ${ext !== "" ? ext : " no ext"}: ${filesByExtension[ext].length}\n`;
   }
 
+  const maxThreads = Math.max(1, Math.floor(os.availableParallelism() * 0.7));
+
+  console.log(`Max concurrency  : ${maxThreads}`);
   console.log(`Files found      : ${totalFiles}`);
   console.log(extLog);
 
   // start testing
-  const maxThreads = Math.max(1, Math.floor(os.cpus().length * 0.7));
-
-  console.log(
-    `\nVerifying ${filesByExtension[".flac"].length} flacs using ${maxThreads} threads`,
-  );
-
   const results = await testAll(filesByExtension[".flac"], maxThreads);
 
-  return { filesVerified: filesByExtension[".flac"].length, ...results };
+  return { flacCount: filesByExtension[".flac"].length, ...results };
 }
 
 main()
-  .then((results) => {
-    const totalSeconds = (performance.now() - timer) / 1000;
-    console.log(
-      styleText("reset", `\n\nCompleted in ${totalSeconds.toFixed(2)}s!`),
-    );
-    console.log(styleText("green", `Checked : ${results.filesVerified}`));
-    console.log(styleText("green", `Passed  : ${results.passed.length}`));
-    console.log(styleText("red", `Failed  : ${results.failed.length}`));
-    console.log(styleText("yellow", `No MD5  : ${results.noMd5.length}`));
+  .then(({ flacCount, passed, failed, noMd5 }) => {
+    const color =
+      failed.length > 0 ? "red" : noMd5.length > 0 ? "yellow" : "green";
 
-    if (results.noMd5.length > 0) {
+    console.log(
+      styleText(
+        color,
+        `\nCompleted in ${((performance.now() - timer) / 1000).toFixed(2)}s! Checked: ${flacCount} | Passed: ${passed.length} | Failed: ${failed.length} | No MD5: ${noMd5.length}`,
+      ),
+    );
+
+    if (noMd5.length > 0) {
       console.log(
         styleText("yellow", "\n--- Flacs without MD5 set in STREAMINFO ---"),
       );
 
-      results.noMd5.forEach((f, i) => {
+      noMd5.forEach((f, i) => {
         console.log(styleText("yellow", `[${i + 1}] ${f}`));
       });
     }
 
-    if (results.failed.length > 0) {
+    if (failed.length > 0) {
       console.log(styleText("red", "\n--- Flacs that failed verification ---"));
 
-      results.failed.forEach((f, i) => {
+      failed.forEach((f, i) => {
         console.log(styleText("red", `\n[${i + 1}] ${f.path}`));
         console.log(f.error);
 
@@ -174,6 +178,8 @@ main()
             `${styleText("yellow", "[!]")} The path length of this file is greater than 252, which can make the test fail on Windows, even if the file is fine`,
           );
       });
+
+      process.exitCode = 1;
     }
   })
   .catch((err) => {
