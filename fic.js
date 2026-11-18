@@ -3,18 +3,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { styleText } from "node:util";
+import { parseArgs, styleText } from "node:util";
 import { spawn, spawnSync } from "node:child_process";
 
 const timer = performance.now();
 
 function renderProgress(done, total) {
-  const width = 80; // bar width in chars
-  const ratio = done / total;
-  const filled = Math.floor(width * ratio);
-  const bar = "#".repeat(filled) + " ".repeat(width - filled);
+  if (!process.stdout.isTTY) return;
+
+  const label = ` ${done}/${total} (${Math.round((done / total) * 100)}%)`;
+  const width = Math.max(10, (process.stdout.columns ?? 80) - label.length - 3);
+  const filled = Math.floor(width * (done / total));
+
   process.stdout.write(
-    `\r[${bar}] ${done}/${total} (${Math.round(ratio * 100)}%)`,
+    `\r[${"#".repeat(filled)}${" ".repeat(width - filled)}]${label}`,
   );
 }
 
@@ -67,30 +69,43 @@ async function testAll(files, concurrency) {
   return results;
 }
 
+function scanDir(dir, files = [], skipped = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    skipped.push({ path: dir, error: err.code });
+    return { files, skipped };
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) scanDir(full, files, skipped);
+    else if (e.isFile()) files.push(full);
+  }
+  return { files, skipped };
+}
+
 async function main() {
-  const banner = `┌─┐┬  ┌─┐┌─┐   ┬┌┐┌┌┬┐┌─┐┌─┐┬─┐┬┌┬┐┬ ┬   ┌─┐┬ ┬┌─┐┌─┐┬┌─┌─┐┬─┐
+  const banner = `
+┌─┐┬  ┌─┐┌─┐   ┬┌┐┌┌┬┐┌─┐┌─┐┬─┐┬┌┬┐┬ ┬   ┌─┐┬ ┬┌─┐┌─┐┬┌─┌─┐┬─┐
 ├┤ │  ├─┤│  ───││││ │ ├┤ │ ┬├┬┘│ │ └┬┘───│  ├─┤├┤ │  ├┴┐├┤ ├┬┘
 └  ┴─┘┴ ┴└─┘   ┴┘└┘ ┴ └─┘└─┘┴└─┴ ┴  ┴    └─┘┴ ┴└─┘└─┘┴ ┴└─┘┴└─
 `;
-  console.log(styleText("magenta", banner));
+  console.log(banner.trimStart());
 
-  // check if flac is available
-  const checkFlac = spawnSync("flac", ["--version"]);
+  // parse args
+  const args = parseArgs({
+    allowPositionals: true,
+    options: {
+      "max-concurrency": { type: "string", short: "c" },
+    },
+  });
 
-  if (checkFlac.status !== 0 || checkFlac.error?.code === "ENOENT")
-    throw new Error(
-      `Could not run flac. Make sure it is present in your path. Please install it first from https://xiph.org/flac/download.html`,
-      { cause: checkFlac.error },
-    );
+  if (args.positionals.length > 1)
+    throw new Error("Please enter only options and a single directory path");
 
-  const args = process.argv.slice(2);
+  const sourceDir = path.resolve(args.positionals[0] ?? ".");
 
-  if (args.length !== 1)
-    throw new Error("Please enter the directory path where your flacs are");
-
-  const sourceDir = path.resolve(args[0]);
-
-  // check if provided source directory is valid
   let sourceDirStat;
   try {
     sourceDirStat = fs.statSync(sourceDir);
@@ -101,16 +116,46 @@ async function main() {
   if (!sourceDirStat.isDirectory())
     throw new Error("Provided path does not point to a directory");
 
-  console.log(`Source Directory : ${sourceDir}`);
+  // calculate max concurrency
+  let maxConcurrency = Math.max(1, Math.floor(os.availableParallelism() * 0.7));
+
+  const requestedConcurrency = args.values["max-concurrency"];
+
+  if (requestedConcurrency !== undefined) {
+    if (
+      !/^\d+$/.test(requestedConcurrency) ||
+      Number(requestedConcurrency) < 1
+    ) {
+      throw new Error(
+        `Invalid value for --max-concurrency: "${requestedConcurrency}". Expected a positive integer.`,
+      );
+    }
+
+    maxConcurrency = Math.min(
+      Number(requestedConcurrency),
+      os.availableParallelism(),
+    );
+  }
+
+  // check if flac is available
+  const checkFlac = spawnSync("flac", ["--version"]);
+
+  if (checkFlac.error) {
+    const errorMsg =
+      checkFlac.error.code === "ENOENT"
+        ? "Cannot run flac: Make sure it is available in your PATH."
+        : `Cannot run flac: ${checkFlac.error.message}`;
+
+    throw new Error(errorMsg);
+  }
+
+  if (checkFlac.status !== 0)
+    throw new Error(
+      `flac version check failed with exit code ${checkFlac.status}`,
+    );
 
   // scan source directory for files
-  const files = fs
-    .readdirSync(sourceDir, {
-      withFileTypes: true,
-      recursive: true,
-    })
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.join(entry.parentPath, entry.name));
+  const { files, skipped } = scanDir(sourceDir);
 
   const filesByExtension = {};
 
@@ -121,8 +166,14 @@ async function main() {
     filesByExtension[ext].push(file);
   }
 
-  if (!filesByExtension[".flac"] || filesByExtension[".flac"].length === 0)
-    throw new Error("Directory does not contain any flac to test");
+  if (!filesByExtension[".flac"] || filesByExtension[".flac"].length === 0) {
+    const reason =
+      skipped.length > 0
+        ? `No flac files found, and ${skipped.length} directories could not be read (first: ${skipped[0].path}, ${skipped[0].error})`
+        : `Source directory does not contain any flac files: ${sourceDir}`;
+
+    throw new Error(reason);
+  }
 
   let totalFiles = 0;
   let extLog = "";
@@ -132,27 +183,49 @@ async function main() {
     extLog += `    ${ext !== "" ? ext : " no ext"}: ${filesByExtension[ext].length}\n`;
   }
 
-  const maxThreads = Math.max(1, Math.floor(os.availableParallelism() * 0.7));
-
-  console.log(`Max concurrency  : ${maxThreads}`);
-  console.log(`Files found      : ${totalFiles}`);
-  console.log(extLog);
+  // summary
+  console.log(`Source Directory     : ${sourceDir}`);
+  console.log(`Max concurrency      : ${maxConcurrency}`);
+  console.log(`Files found          : ${totalFiles}`);
+  console.log(extLog.trimEnd());
+  if (skipped.length > 0) {
+    console.log(`Directories skipped  : ${skipped.length}\n`);
+    skipped.forEach((s, i) =>
+      console.log(`    ${i + 1}. ${s.path} (${s.error})`),
+    );
+  }
+  console.log();
 
   // start testing
-  const results = await testAll(filesByExtension[".flac"], maxThreads);
+  const results = await testAll(filesByExtension[".flac"], maxConcurrency);
 
-  return { flacCount: filesByExtension[".flac"].length, ...results };
+  return {
+    skippedDirectories: skipped,
+    totalFlacs: filesByExtension[".flac"].length,
+    ...results,
+  };
 }
 
 main()
-  .then(({ flacCount, passed, failed, noMd5 }) => {
+  .then(({ skippedDirectories, totalFlacs, passed, failed, noMd5 }) => {
+    if (skippedDirectories.length > 0) process.exitCode = 2;
+
     const color =
-      failed.length > 0 ? "red" : noMd5.length > 0 ? "yellow" : "green";
+      failed.length > 0
+        ? "red"
+        : noMd5.length > 0 || skippedDirectories.length > 0
+          ? "yellow"
+          : "green";
+
+    const skippedPart =
+      skippedDirectories.length > 0
+        ? `Skipped Directories: ${skippedDirectories.length} | `
+        : "";
 
     console.log(
       styleText(
         color,
-        `\nCompleted in ${((performance.now() - timer) / 1000).toFixed(2)}s! Checked: ${flacCount} | Passed: ${passed.length} | Failed: ${failed.length} | No MD5: ${noMd5.length}`,
+        `\nCompleted in ${((performance.now() - timer) / 1000).toFixed(2)}s! ${skippedPart}Checked: ${totalFlacs} | Passed: ${passed.length} | Failed: ${failed.length} | No MD5: ${noMd5.length}`,
       ),
     );
 
